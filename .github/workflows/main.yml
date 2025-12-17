@@ -1,53 +1,79 @@
-name: Lomiri Images
+name: Lomiri Images Build
+
 on:
-    workflow_dispatch:
+  workflow_dispatch:
 
 jobs:
-    build:
-        strategy:
-            matrix:
-                include:
-                    - device: trogdor
-                      vendor: google
-                      packages: chatty,firefox-esr,gnome-software,flatpak,gnome-software-plugin-flatpak,gnome-contacts,gnome-weather,calls,phosh-antispam,dialect,gnome-maps,gnome-console,networkmanager,modemmanager,konsole
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - device: trogdor
+            vendor: google
+            packages: "chatty,firefox-esr,gnome-software,flatpak,gnome-software-plugin-flatpak,gnome-contacts,gnome-weather,calls,phosh-antispam,dialect,gnome-maps,gnome-console,networkmanager,modemmanager,konsole"
 
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-        runs-on: ubuntu-latest
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
 
-        steps:
-            - name: Checkout code
-              uses: actions/checkout@v2
+      - name: Install pmbootstrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git openssl
+          git clone https://gitlab.com/postmarketOS/pmbootstrap.git
+          mkdir -p ~/.local/bin
+          ln -s "$PWD/pmbootstrap/pmbootstrap.py" ~/.local/bin/pmbootstrap
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+          # Initialisation minimale pour vérifier l'installation
+          ~/.local/bin/pmbootstrap --version
 
-            - name: Install pmbootstrap
-              run: |
-                    sudo apt-get update
-                    #sudo apt-get install -y python3-pip
-                    #sudo apt-get install -y pmbootstrap
-                    sudo apt-get install -y build-essential python3 git
-                    git clone https://gitlab.com/postmarketOS/pmbootstrap.git
-                    mkdir -p ~/.local/bin
-                    ln -s "$PWD/pmbootstrap/pmbootstrap.py" ~/.local/bin/pmbootstrap
-                    pmbootstrap --version
-                    #mkdir -p ~/.local/var/pmbootstrap/cache_git
-            - name: Building Images
-              run: |
-                    cd ../..
-                    printf '.local/var/pmbootstrap\nedge\n${{ matrix.vendor }}\n${{ matrix.device }}\nuser\ndefault\ngnome-mobile\n\n${{ matrix.packages }}\nn\nen_US\n${{ matrix.vendor }}-${{ matrix.device }}\ny\n123456\n123456' | pmbootstrap init
-                    cd .local/var/pmbootstrap/cache_git/pmaports
-                    git checkout feature/lomiri
-                    printf '\nedge\n${{ matrix.vendor }}\n${{ matrix.device }}\nuser\ndefault\nlomiri\n\n${{ matrix.packages }}\nn\nen_US\n${{ matrix.vendor }}-${{ matrix.device }}\ny\ny' | pmbootstrap init
-                    printf '123456\n123456' | pmbootstrap install
-            - name: Compress Image
-              run: |
-                sudo mv /home/runner/work/.local/var/pmbootstrap/*/home/pmos/rootfs/${{ matrix.vendor }}-${{ matrix.device }}.img /home/runner/work/${{ matrix.vendor }}-${{ matrix.device }}.img
-                sudo xz -z9e /home/runner/work/${{ matrix.vendor }}-${{ matrix.device }}.img
-                ls
-                #cd ../..
-                #file_path=$(sudo find . -name *.img)
-                #sudo xz -z6 ../..$file_path
-                #mv $file_path.xz ./${{ matrix.vendor }}-${{ matrix.device }}.img.xz
-            - name: Upload Compressed Image
-              uses: actions/upload-artifact@v3
-              with:
-                name: Compressed Images
-                path: /home/runner/work/${{ matrix.vendor }}-${{ matrix.device }}.img.xz
+      - name: Configure and Build
+        run: |
+          # 1. Configuration initiale (non-interactive)
+          pmbootstrap init \
+            --work-path "$GITHUB_WORKSPACE/.pmbootstrap" \
+            --mirror-alpine "http://dl-cdn.alpinelinux.org/alpine/" \
+            --channel "edge" \
+            --vendor "${{ matrix.vendor }}" \
+            --device "${{ matrix.device }}" \
+            --ui "lomiri" \
+            --extra-packages "${{ matrix.packages }}"
+
+          # 2. Passage sur la branche Lomiri pour pmaports
+          cd "$GITHUB_WORKSPACE/.pmbootstrap/cache_git/pmaports"
+          git checkout feature/lomiri || echo "Branche déjà sélectionnée ou inexistante"
+          
+          # 3. Installation / Génération du rootfs
+          # On utilise --password pour définir le code PIN/MDP sans prompt
+          pmbootstrap install --password 123456
+
+      - name: Export and Compress Image
+        run: |
+          # Export de l'image vers le dossier de travail
+          mkdir -p $GITHUB_WORKSPACE/output
+          # On cherche l'image générée (le chemin peut varier selon la version de pmos)
+          IMG_PATH=$(find "$GITHUB_WORKSPACE/.pmbootstrap/chroot_native/home/pmos/rootfs" -name "*.img" | head -n 1)
+          
+          if [ -z "$IMG_PATH" ]; then
+            echo "Erreur: Image introuvable"
+            exit 1
+          fi
+
+          sudo mv "$IMG_PATH" "$GITHUB_WORKSPACE/output/${{ matrix.vendor }}-${{ matrix.device }}.img"
+          
+          # Compression multithreadée
+          cd $GITHUB_WORKSPACE/output
+          xz -z9ev -T0 "${{ matrix.vendor }}-${{ matrix.device }}.img"
+
+      - name: Upload Compressed Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: lomiri-image-${{ matrix.device }}
+          path: output/${{ matrix.vendor }}-${{ matrix.device }}.img.xz
+          retention-days: 5
